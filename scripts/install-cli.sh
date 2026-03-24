@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-BIN_DIR="${HOME}/.local/bin"
+BIN_DIR="${HOME}/bin"
 INSTALL_DIR="${HOME}/.local/share/ccode"
 FORCE=0
 

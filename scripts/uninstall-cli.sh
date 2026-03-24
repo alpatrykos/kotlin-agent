@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BIN_DIR="${HOME}/.local/bin"
+BIN_DIR="${HOME}/bin"
 INSTALL_DIR="${HOME}/.local/share/ccode"
 
 usage() {

@@ -18,6 +18,9 @@ Kotlin(JVM) coding agent with a reusable core, a local tool runtime, and an inte
 5. `scripts/install-cli.sh`
 6. `ccode`
 
+The installer places the launcher in `~/bin/ccode` by default and keeps the
+versioned distribution under `~/.local/share/ccode/`.
+
 ## CLI
 
 - `ccode` starts the REPL in the current directory.
