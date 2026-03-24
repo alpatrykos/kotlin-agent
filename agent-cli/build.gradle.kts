@@ -1,3 +1,5 @@
+import org.gradle.jvm.application.tasks.CreateStartScripts
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     application
@@ -9,6 +11,20 @@ kotlin {
 
 application {
     mainClass = "com.crackedcode.agent.cli.MainKt"
+}
+
+distributions {
+    main {
+        distributionBaseName = "ccode"
+    }
+}
+
+tasks.named<CreateStartScripts>("startScripts") {
+    applicationName = "ccode"
+}
+
+tasks.named<JavaExec>("run") {
+    standardInput = System.`in`
 }
 
 dependencies {

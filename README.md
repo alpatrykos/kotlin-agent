@@ -14,4 +14,20 @@ Kotlin(JVM) coding agent with a reusable core, a local tool runtime, and an inte
 1. `./gradlew test`
 2. Set `OPENAI_API_KEY`
 3. Optionally set `OPENAI_BASE_URL` and `CRACKEDCODE_MODEL`
-4. `./gradlew :agent-cli:run`
+4. `./gradlew installCcode`
+5. `scripts/install-cli.sh`
+6. `ccode`
+
+## CLI
+
+- `ccode` starts the REPL in the current directory.
+- `ccode --workspace /path/to/repo` starts the REPL for an explicit workspace.
+- `ccode resume <session-id>` resumes a session and enters the REPL.
+- `ccode status [session-id]` prints recent sessions or one specific session.
+- `ccode tools` lists the available tools.
+
+## Config
+
+- Global fallback config: `~/.config/ccode/config.properties`
+- Workspace override config: `.crackedcode-agent/config.properties`
+- Environment variables win over both config files: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CRACKEDCODE_MODEL`
