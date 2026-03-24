@@ -34,6 +34,13 @@ class CliCommandParserTest {
     }
 
     @Test
+    fun `parses version commands`() {
+        assertEquals(CliCommand.Version, parser.parse(listOf("version")).command)
+        assertEquals(CliCommand.Version, parser.parse(listOf("--version")).command)
+        assertEquals(CliCommand.Version, parser.parse(listOf("-v")).command)
+    }
+
+    @Test
     fun `rejects unknown commands`() {
         assertFailsWith<CliUsageException> {
             parser.parse(listOf("bogus"))

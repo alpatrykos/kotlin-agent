@@ -43,6 +43,18 @@ class CliApplicationIntegrationTest {
     }
 
     @Test
+    fun `version command prints current version`() = runBlocking {
+        val workspaceRoot = Files.createTempDirectory("ccode-version-workspace")
+        val io = FakeTerminalIO(isInteractive = false)
+        val app = createApplication(workspaceRoot, io)
+
+        val exitCode = app.run(listOf("version"))
+
+        assertEquals(0, exitCode)
+        assertContains(io.output, "ccode ${VersionInfo.current}")
+    }
+
+    @Test
     fun `resume command enters repl and prints pending approval`() = runBlocking {
         val workspaceRoot = Files.createTempDirectory("ccode-resume-workspace")
         val config = AgentConfig(workspaceRoot = workspaceRoot)

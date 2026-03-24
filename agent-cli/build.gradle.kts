@@ -23,6 +23,13 @@ tasks.named<CreateStartScripts>("startScripts") {
     applicationName = "ccode"
 }
 
+tasks.processResources {
+    inputs.property("version", project.version.toString())
+    filesMatching("ccode-version.txt") {
+        expand("version" to project.version.toString())
+    }
+}
+
 tasks.named<JavaExec>("run") {
     standardInput = System.`in`
 }

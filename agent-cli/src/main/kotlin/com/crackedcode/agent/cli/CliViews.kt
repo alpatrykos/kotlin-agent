@@ -11,6 +11,7 @@ fun printUsage(io: TerminalIO) {
           ccode resume <session-id> [--workspace PATH]
           ccode status [session-id] [--workspace PATH]
           ccode tools [--workspace PATH]
+          ccode version
           ccode help
         """.trimIndent(),
     )
@@ -38,6 +39,10 @@ fun printTools(io: TerminalIO, engine: AgentEngine) {
         val approval = if (tool.mutating) "approval required" else "auto-approved"
         io.println("- ${tool.name}: ${tool.description} [$approval]")
     }
+}
+
+fun printVersion(io: TerminalIO) {
+    io.println("ccode ${VersionInfo.current}")
 }
 
 suspend fun printStatus(io: TerminalIO, engine: AgentEngine, sessionId: String?): Int {

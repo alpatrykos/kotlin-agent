@@ -7,6 +7,8 @@ sealed interface CliCommand {
 
     data object Tools : CliCommand
 
+    data object Version : CliCommand
+
     data object Help : CliCommand
 }
 
@@ -21,6 +23,7 @@ class CliCommandParser {
     fun parse(args: List<String>): CliInvocation {
         var workspaceOverride: String? = null
         var helpRequested = false
+        var versionRequested = false
         val positionals = mutableListOf<String>()
 
         var index = 0
@@ -39,6 +42,11 @@ class CliCommandParser {
                     index += 1
                 }
 
+                "--version", "-v" -> {
+                    versionRequested = true
+                    index += 1
+                }
+
                 else -> {
                     positionals += arg
                     index += 1
@@ -50,12 +58,22 @@ class CliCommandParser {
             return CliInvocation(workspaceOverride, CliCommand.Help)
         }
 
+        if (versionRequested) {
+            return CliInvocation(workspaceOverride, CliCommand.Version)
+        }
+
         if (positionals.isEmpty()) {
             return CliInvocation(workspaceOverride, CliCommand.Repl())
         }
 
         return when (positionals.first()) {
             "help" -> CliInvocation(workspaceOverride, CliCommand.Help)
+            "version" -> {
+                if (positionals.size != 1) {
+                    throw CliUsageException("Usage: ccode version")
+                }
+                CliInvocation(workspaceOverride, CliCommand.Version)
+            }
             "resume" -> {
                 if (positionals.size != 2) {
                     throw CliUsageException("Usage: ccode resume <session-id> [--workspace PATH]")

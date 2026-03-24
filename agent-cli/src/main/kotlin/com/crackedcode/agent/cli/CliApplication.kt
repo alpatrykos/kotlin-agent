@@ -21,6 +21,11 @@ class CliApplication(
             return 0
         }
 
+        if (invocation.command == CliCommand.Version) {
+            printVersion(io)
+            return 0
+        }
+
         val workspaceRoot = try {
             workspaceResolver.resolve(invocation.workspaceOverride)
         } catch (error: CliUsageException) {
@@ -32,6 +37,7 @@ class CliApplication(
             is CliCommand.Repl -> runRepl(workspaceRoot, command.resumeSessionId)
             is CliCommand.Status -> runStatus(workspaceRoot, command.sessionId)
             CliCommand.Tools -> runTools(workspaceRoot)
+            CliCommand.Version -> 0
             CliCommand.Help -> 0
         }
     }
