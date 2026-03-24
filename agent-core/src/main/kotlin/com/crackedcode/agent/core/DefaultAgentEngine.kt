@@ -274,6 +274,7 @@ class DefaultAgentEngine(
             artifactRoot = config.sessionArtifactRoot(sessionId),
             shellTimeoutMillis = config.shellTimeoutMillis,
             maxOutputChars = config.maxToolOutputChars,
+            protectedWorkspacePaths = config.protectedWorkspacePaths(),
         )
         return try {
             sessionStore.updateToolInvocation(

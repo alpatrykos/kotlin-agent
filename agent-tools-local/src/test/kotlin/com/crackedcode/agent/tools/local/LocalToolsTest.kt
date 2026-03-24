@@ -8,6 +8,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class LocalToolsTest {
@@ -37,6 +38,7 @@ class LocalToolsTest {
                 artifactRoot = workspaceRoot.resolve(".artifacts"),
                 shellTimeoutMillis = 1_000,
                 maxOutputChars = 10_000,
+                protectedWorkspacePaths = setOf(workspaceRoot.resolve(".crackedcode-agent").normalize()),
             ),
         )
 
@@ -57,10 +59,118 @@ class LocalToolsTest {
                 artifactRoot = workspaceRoot.resolve(".artifacts"),
                 shellTimeoutMillis = 1_000,
                 maxOutputChars = 10_000,
+                protectedWorkspacePaths = setOf(workspaceRoot.resolve(".crackedcode-agent").normalize()),
             ),
         )
 
         assertTrue(result.content.contains("exit_code: 0"))
         assertTrue(result.content.contains("hi"))
+    }
+
+    @Test
+    fun `read file blocks protected workspace paths`() {
+        val workspaceRoot = Files.createTempDirectory("local-tools-read")
+        val protectedFile = workspaceRoot.resolve(".crackedcode-agent").resolve("config.properties")
+        Files.createDirectories(protectedFile.parent)
+        Files.writeString(protectedFile, "apiKey=secret\n", StandardCharsets.UTF_8)
+        val symlink = workspaceRoot.resolve("linked-secret.properties")
+        Files.createSymbolicLink(symlink, protectedFile)
+
+        val error = assertFailsWith<IllegalStateException> {
+            runBlocking {
+                ReadFileTool().execute(
+                    buildJsonObject { put("path", ".crackedcode-agent/config.properties") },
+                    toolContext(workspaceRoot),
+                )
+            }
+        }
+
+        assertTrue(error.message.orEmpty().contains(".crackedcode-agent/config.properties"))
+        val symlinkError = assertFailsWith<IllegalStateException> {
+            runBlocking {
+                ReadFileTool().execute(
+                    buildJsonObject { put("path", "linked-secret.properties") },
+                    toolContext(workspaceRoot),
+                )
+            }
+        }
+
+        assertTrue(symlinkError.message.orEmpty().contains("linked-secret.properties"))
+    }
+
+    @Test
+    fun `list files hides protected workspace paths`() {
+        val workspaceRoot = Files.createTempDirectory("local-tools-list")
+        Files.writeString(workspaceRoot.resolve("visible.txt"), "hello\n", StandardCharsets.UTF_8)
+        val protectedDir = workspaceRoot.resolve(".crackedcode-agent")
+        Files.createDirectories(protectedDir)
+        Files.writeString(protectedDir.resolve("secret.txt"), "secret\n", StandardCharsets.UTF_8)
+        Files.createSymbolicLink(workspaceRoot.resolve("linked-secret.txt"), protectedDir.resolve("secret.txt"))
+
+        val result = runBlocking {
+            ListFilesTool().execute(
+                buildJsonObject {
+                    put("path", ".")
+                    put("max_depth", 3)
+                },
+                toolContext(workspaceRoot),
+            )
+        }
+
+        assertTrue(result.content.contains("visible.txt"))
+        assertTrue(!result.content.contains(".crackedcode-agent"))
+        assertTrue(!result.content.contains("linked-secret.txt"))
+        assertFailsWith<IllegalStateException> {
+            runBlocking {
+                ListFilesTool().execute(
+                    buildJsonObject { put("path", ".crackedcode-agent") },
+                    toolContext(workspaceRoot),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `search files hides protected workspace paths`() {
+        val workspaceRoot = Files.createTempDirectory("local-tools-search")
+        Files.writeString(workspaceRoot.resolve("visible.txt"), "needle\n", StandardCharsets.UTF_8)
+        val protectedDir = workspaceRoot.resolve(".crackedcode-agent")
+        Files.createDirectories(protectedDir)
+        Files.writeString(protectedDir.resolve("secret.txt"), "needle\n", StandardCharsets.UTF_8)
+
+        val result = runBlocking {
+            SearchFilesTool().execute(
+                buildJsonObject {
+                    put("query", "needle")
+                    put("path", ".")
+                },
+                toolContext(workspaceRoot),
+            )
+        }
+
+        assertTrue(result.content.contains("visible.txt:1:needle"))
+        assertTrue(!result.content.contains(".crackedcode-agent"))
+        assertFailsWith<IllegalStateException> {
+            runBlocking {
+                SearchFilesTool().execute(
+                    buildJsonObject {
+                        put("query", "needle")
+                        put("path", ".crackedcode-agent")
+                    },
+                    toolContext(workspaceRoot),
+                )
+            }
+        }
+    }
+
+    private fun toolContext(workspaceRoot: java.nio.file.Path): ToolExecutionContext {
+        return ToolExecutionContext(
+            sessionId = "session-test",
+            workspaceRoot = workspaceRoot,
+            artifactRoot = workspaceRoot.resolve(".artifacts"),
+            shellTimeoutMillis = 1_000,
+            maxOutputChars = 10_000,
+            protectedWorkspacePaths = setOf(workspaceRoot.resolve(".crackedcode-agent").normalize()),
+        )
     }
 }

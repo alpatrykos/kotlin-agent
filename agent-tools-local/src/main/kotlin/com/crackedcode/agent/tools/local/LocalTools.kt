@@ -45,10 +45,12 @@ class ListFilesTool : Tool {
 
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolResult {
         val path = resolveWorkspacePath(arguments.string("path") ?: ".", context.workspaceRoot)
+        requireModelReadablePath(path, context)
         val maxDepth = arguments.int("max_depth") ?: 4
         val entries = Files.walk(path, maxDepth).use { stream ->
             stream
                 .filter { it != path }
+                .filter { isModelReadablePath(it, context.workspaceRoot, context.protectedWorkspacePaths) }
                 .sorted()
                 .map { workspaceRelative(it, context.workspaceRoot) + if (Files.isDirectory(it)) "/" else "" }
                 .toList()
@@ -80,6 +82,7 @@ class ReadFileTool : Tool {
 
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolResult {
         val file = resolveWorkspacePath(arguments.requiredString("path"), context.workspaceRoot)
+        requireModelReadablePath(file, context)
         val lines = Files.readAllLines(file, StandardCharsets.UTF_8)
         val startLine = (arguments.int("start_line") ?: 1).coerceAtLeast(1)
         val endLine = (arguments.int("end_line") ?: lines.size).coerceAtMost(lines.size)
@@ -119,10 +122,14 @@ class SearchFilesTool : Tool {
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolResult {
         val query = arguments.requiredString("query")
         val path = resolveWorkspacePath(arguments.string("path") ?: ".", context.workspaceRoot)
+        requireModelReadablePath(path, context)
         val maxResults = (arguments.int("max_results") ?: 50).coerceIn(1, 200)
 
-        val result = runCatching { searchWithRipgrep(query, path, context.workspaceRoot, maxResults) }
-            .getOrElse { fallbackSearch(query, path, context.workspaceRoot, maxResults) }
+        val result = runCatching {
+            searchWithRipgrep(query, path, context.workspaceRoot, context.protectedWorkspacePaths, maxResults)
+        }.getOrElse {
+            fallbackSearch(query, path, context.workspaceRoot, context.protectedWorkspacePaths, maxResults)
+        }
 
         return ToolResult(
             content = result.joinToString(separator = "\n").ifBlank { "(no matches)" },
@@ -133,17 +140,27 @@ class SearchFilesTool : Tool {
         )
     }
 
-    private fun searchWithRipgrep(query: String, path: Path, workspaceRoot: Path, maxResults: Int): List<String> {
-        val process = ProcessBuilder(
+    private fun searchWithRipgrep(
+        query: String,
+        path: Path,
+        workspaceRoot: Path,
+        protectedWorkspacePaths: Set<Path>,
+        maxResults: Int,
+    ): List<String> {
+        val command = mutableListOf(
             "rg",
             "-n",
             "--color",
             "never",
             "--max-count",
             maxResults.toString(),
-            query,
-            path.toString(),
-        ).directory(workspaceRoot.toFile()).start()
+        )
+        ripgrepExclusions(workspaceRoot, protectedWorkspacePaths).forEach { glob ->
+            command += listOf("--glob", glob)
+        }
+        command += listOf(query, path.toString())
+
+        val process = ProcessBuilder(command).directory(workspaceRoot.toFile()).start()
         if (!process.waitFor(10, TimeUnit.SECONDS)) {
             process.destroyForcibly()
             error("ripgrep timed out")
@@ -155,22 +172,30 @@ class SearchFilesTool : Tool {
         return output.lines().filter { it.isNotBlank() }.take(maxResults)
     }
 
-    private fun fallbackSearch(query: String, path: Path, workspaceRoot: Path, maxResults: Int): List<String> {
+    private fun fallbackSearch(
+        query: String,
+        path: Path,
+        workspaceRoot: Path,
+        protectedWorkspacePaths: Set<Path>,
+        maxResults: Int,
+    ): List<String> {
         val matches = mutableListOf<String>()
         Files.walk(path).use { stream ->
-            stream.filter { Files.isRegularFile(it) }.forEach { file ->
-                if (matches.size >= maxResults) {
-                    return@forEach
-                }
-                val relative = workspaceRelative(file, workspaceRoot)
-                runCatching {
-                    Files.readAllLines(file, StandardCharsets.UTF_8).forEachIndexed { index, line ->
-                        if (line.contains(query) && matches.size < maxResults) {
-                            matches += "$relative:${index + 1}:$line"
+            stream
+                .filter { Files.isRegularFile(it) && isModelReadablePath(it, workspaceRoot, protectedWorkspacePaths) }
+                .forEach { file ->
+                    if (matches.size >= maxResults) {
+                        return@forEach
+                    }
+                    val relative = workspaceRelative(file, workspaceRoot)
+                    runCatching {
+                        Files.readAllLines(file, StandardCharsets.UTF_8).forEachIndexed { index, line ->
+                            if (line.contains(query) && matches.size < maxResults) {
+                                matches += "$relative:${index + 1}:$line"
+                            }
                         }
                     }
                 }
-            }
         }
         return matches
     }
@@ -470,6 +495,45 @@ private fun workspaceRelative(path: Path, workspaceRoot: Path): String {
         workspaceRoot.relativize(path).toString().ifBlank { "." }
     } else {
         path.toString()
+    }
+}
+
+private fun isModelReadablePath(path: Path, workspaceRoot: Path, protectedWorkspacePaths: Set<Path>): Boolean {
+    val normalizedPath = path.normalize()
+    if (protectedWorkspacePaths.any { normalizedPath.startsWith(it) }) {
+        return false
+    }
+
+    val realPath = existingRealPath(normalizedPath) ?: return true
+    val realWorkspaceRoot = existingRealPath(workspaceRoot.normalize()) ?: workspaceRoot.normalize()
+    if (!realPath.startsWith(realWorkspaceRoot)) {
+        return false
+    }
+
+    return protectedWorkspacePaths.none { protectedPath ->
+        val realProtectedPath = existingRealPath(protectedPath) ?: protectedPath
+        realPath.startsWith(realProtectedPath)
+    }
+}
+
+private fun requireModelReadablePath(path: Path, context: ToolExecutionContext) {
+    if (!isModelReadablePath(path, context.workspaceRoot, context.protectedWorkspacePaths)) {
+        error("Path is protected from model-readable tools: ${workspaceRelative(path, context.workspaceRoot)}")
+    }
+}
+
+private fun ripgrepExclusions(workspaceRoot: Path, protectedWorkspacePaths: Set<Path>): List<String> {
+    return protectedWorkspacePaths.flatMap { protectedPath ->
+        val relative = workspaceRelative(protectedPath, workspaceRoot).replace('\\', '/')
+        listOf("!$relative", "!$relative/**")
+    }
+}
+
+private fun existingRealPath(path: Path): Path? {
+    return if (Files.exists(path)) {
+        runCatching { path.toRealPath() }.getOrNull()
+    } else {
+        null
     }
 }
 

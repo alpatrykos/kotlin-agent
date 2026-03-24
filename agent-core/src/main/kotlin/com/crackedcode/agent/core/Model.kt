@@ -15,6 +15,16 @@ data class AgentConfig(
 ) {
     fun sessionArtifactRoot(sessionId: String): Path = storageRoot.resolve("sessions").resolve(sessionId)
 
+    fun protectedWorkspacePaths(): Set<Path> {
+        val normalizedWorkspaceRoot = workspaceRoot.normalize()
+        val protectedPaths = mutableSetOf(workspaceRoot.resolve(".crackedcode-agent").normalize())
+        val normalizedStorageRoot = storageRoot.normalize()
+        if (normalizedStorageRoot != normalizedWorkspaceRoot && normalizedStorageRoot.startsWith(normalizedWorkspaceRoot)) {
+            protectedPaths.add(normalizedStorageRoot)
+        }
+        return protectedPaths
+    }
+
     companion object {
         const val DEFAULT_SYSTEM_PROMPT: String =
             "You are a Kotlin coding agent. Prefer safe local analysis, describe tradeoffs clearly, and use tools only when needed."

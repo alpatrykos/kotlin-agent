@@ -8,6 +8,7 @@ data class ToolExecutionContext(
     val artifactRoot: Path,
     val shellTimeoutMillis: Long,
     val maxOutputChars: Int,
+    val protectedWorkspacePaths: Set<Path> = emptySet(),
 )
 
 interface Tool {
