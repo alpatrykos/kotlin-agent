@@ -44,17 +44,9 @@ class DefaultAgentEngine(
     }
 
     override fun resumeSession(sessionId: String): Flow<AgentEvent> = flow {
-        val snapshot = requireSession(sessionId)
+        requireSession(sessionId)
         emit(AgentEvent.SessionResumed(sessionId))
-        if (snapshot.pendingApprovals.any { it.status == PendingApprovalStatus.PENDING || it.status == PendingApprovalStatus.APPROVED }) {
-            sessionStore.updateSessionStatus(sessionId, SessionStatus.WAITING_APPROVAL)
-            emit(AgentEvent.StatusChanged(sessionId, SessionStatus.WAITING_APPROVAL))
-            snapshot.pendingApprovals
-                .filter { it.status == PendingApprovalStatus.PENDING || it.status == PendingApprovalStatus.APPROVED }
-                .forEach { emit(AgentEvent.ApprovalRequired(sessionId, it)) }
-        } else {
-            emitAll(runLoop(sessionId))
-        }
+        emitAll(runLoop(sessionId))
     }
 
     override fun reviewApproval(sessionId: String, approvalId: String, approved: Boolean): Flow<AgentEvent> = flow {
@@ -86,7 +78,7 @@ class DefaultAgentEngine(
             )
         }
 
-        val remaining = sessionStore.listPendingApprovals(sessionId).filter { it.status == PendingApprovalStatus.PENDING || it.status == PendingApprovalStatus.APPROVED }
+        val remaining = sessionStore.listPendingApprovals(sessionId).filter { it.status == PendingApprovalStatus.PENDING }
         if (remaining.isNotEmpty()) {
             sessionStore.updateSessionStatus(sessionId, SessionStatus.WAITING_APPROVAL)
             emit(AgentEvent.StatusChanged(sessionId, SessionStatus.WAITING_APPROVAL))
@@ -105,7 +97,24 @@ class DefaultAgentEngine(
     private fun runLoop(sessionId: String): Flow<AgentEvent> = flow {
         while (true) {
             val snapshot = requireSession(sessionId)
-            val pending = snapshot.pendingApprovals.filter { it.status == PendingApprovalStatus.PENDING || it.status == PendingApprovalStatus.APPROVED }
+            val approved = snapshot.pendingApprovals.filter { it.status == PendingApprovalStatus.APPROVED }
+            if (approved.isNotEmpty()) {
+                sessionStore.updateSessionStatus(sessionId, SessionStatus.RUNNING)
+                emit(AgentEvent.StatusChanged(sessionId, SessionStatus.RUNNING))
+                for (approval in approved) {
+                    val toolCall = ToolCallRequest(
+                        id = approval.toolCallId,
+                        name = approval.toolName,
+                        arguments = approval.arguments,
+                    )
+                    emit(AgentEvent.ToolExecutionStarted(sessionId, toolCall))
+                    executeStoredApproval(sessionId, approval)?.let { emit(it) }
+                    sessionStore.updatePendingApproval(sessionId, approval.id, PendingApprovalStatus.EXECUTED)
+                }
+                continue
+            }
+
+            val pending = snapshot.pendingApprovals.filter { it.status == PendingApprovalStatus.PENDING }
             if (pending.isNotEmpty()) {
                 sessionStore.updateSessionStatus(sessionId, SessionStatus.WAITING_APPROVAL)
                 emit(AgentEvent.StatusChanged(sessionId, SessionStatus.WAITING_APPROVAL))
@@ -248,18 +257,25 @@ class DefaultAgentEngine(
         approval: PendingApproval,
         approvalId: String,
     ): AgentEvent.ToolExecutionCompleted? {
+        sessionStore.updateToolInvocation(
+            sessionId = sessionId,
+            toolCallId = approval.toolCallId,
+            status = ToolInvocationStatus.APPROVED,
+            summary = "Approved by user via $approvalId",
+        )
+        return executeStoredApproval(sessionId, approval)
+    }
+
+    private suspend fun executeStoredApproval(
+        sessionId: String,
+        approval: PendingApproval,
+    ): AgentEvent.ToolExecutionCompleted? {
         val toolCall = ToolCallRequest(
             id = approval.toolCallId,
             name = approval.toolName,
             arguments = approval.arguments,
         )
         val tool = toolRegistry.require(toolCall.name)
-        sessionStore.updateToolInvocation(
-            sessionId = sessionId,
-            toolCallId = toolCall.id,
-            status = ToolInvocationStatus.APPROVED,
-            summary = "Approved by user via $approvalId",
-        )
         return executeToolAndPersist(sessionId, toolCall, tool)
     }
 

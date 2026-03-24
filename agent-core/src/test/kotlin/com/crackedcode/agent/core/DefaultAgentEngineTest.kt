@@ -145,6 +145,55 @@ class DefaultAgentEngineTest {
         )
     }
 
+    @Test
+    fun `approved approvals are executed when a session resumes`() = runBlocking {
+        val workspaceRoot = Files.createTempDirectory("crackedcode-engine-test")
+        val config = AgentConfig(workspaceRoot = workspaceRoot)
+        val store = SqliteSessionStore(config.storageRoot.resolve("state.db"))
+        val executedCalls = mutableListOf<String>()
+        val tool = object : Tool {
+            override val spec: ToolSpec = ToolSpec(
+                name = "apply_patch",
+                description = "Apply a patch",
+                parameters = JsonObject(emptyMap()),
+                mutating = true,
+            )
+
+            override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolResult {
+                executedCalls += arguments.toString()
+                return ToolResult("patch applied")
+            }
+        }
+        val provider = ScriptedProvider()
+        val engine = DefaultAgentEngine(
+            config = config,
+            provider = provider,
+            toolRegistry = ToolRegistry(listOf(tool)),
+            sessionStore = store,
+            approvalPolicy = DefaultApprovalPolicy(),
+        )
+
+        val initialEvents = engine.startSession("change the file").toList()
+        val sessionId = (initialEvents.first { it is AgentEvent.SessionStarted } as AgentEvent.SessionStarted).sessionId
+        val approvalId = (initialEvents.first { it is AgentEvent.ApprovalRequired } as AgentEvent.ApprovalRequired).approval.id
+
+        store.updatePendingApproval(sessionId, approvalId, PendingApprovalStatus.APPROVED)
+
+        val resumeEvents = engine.resumeSession(sessionId).toList()
+
+        assertTrue(executedCalls.isNotEmpty(), "tool should execute after resuming an approved approval")
+        assertTrue(resumeEvents.any { it is AgentEvent.ToolExecutionStarted && it.toolCall.id == "call-1" })
+        assertTrue(resumeEvents.any { it is AgentEvent.ToolExecutionCompleted && it.toolCallId == "call-1" })
+        assertTrue(resumeEvents.none { it is AgentEvent.StatusChanged && it.status == SessionStatus.WAITING_APPROVAL })
+
+        val snapshot = store.loadSession(sessionId)
+        assertNotNull(snapshot)
+        assertEquals(SessionStatus.IDLE, snapshot.status)
+        assertTrue(snapshot.pendingApprovals.none { it.status == PendingApprovalStatus.APPROVED || it.status == PendingApprovalStatus.PENDING })
+        assertTrue(snapshot.items.any { it is ToolResultMessage && it.toolName == "apply_patch" })
+        assertTrue(snapshot.items.any { it is AssistantMessage && it.content.contains("Done") })
+    }
+
     private class ScriptedProvider : ModelProvider {
         override fun streamTurn(
             context: SessionContext,

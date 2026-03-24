@@ -408,7 +408,7 @@ private class UnifiedDiffApplier(
     }
 
     private fun parsePatch(patch: String): List<PatchFile> {
-        val lines = patch.replace("\r\n", "\n").split('\n')
+        val lines = patch.replace("\r\n", "\n").split('\n').dropLastWhile { it.isEmpty() }
         val files = mutableListOf<PatchFile>()
         var index = 0
         while (index < lines.size) {
@@ -548,20 +548,10 @@ private fun requireWritableWorkspacePath(path: Path, workspaceRoot: Path) {
     }
 
     val realWorkspaceRoot = existingRealPath(normalizedWorkspaceRoot) ?: normalizedWorkspaceRoot
-    var current = normalizedWorkspaceRoot
-    for (segment in normalizedWorkspaceRoot.relativize(normalizedPath)) {
-        current = current.resolve(segment)
-        if (Files.isSymbolicLink(current)) {
-            error("Path traverses a symbolic link outside the workspace: ${workspaceRelative(path, workspaceRoot)}")
-        }
-    }
-
-    val existingAncestor = nearestExistingPath(normalizedPath)
-    if (existingAncestor != null) {
-        val realAncestor = existingRealPath(existingAncestor) ?: existingAncestor
-        if (!realAncestor.startsWith(realWorkspaceRoot)) {
-            error("Path escapes workspace root: ${workspaceRelative(path, workspaceRoot)}")
-        }
+    val existingAncestor = nearestExistingPath(normalizedPath) ?: normalizedWorkspaceRoot
+    val realAncestor = existingRealPath(existingAncestor) ?: existingAncestor
+    if (!realAncestor.startsWith(realWorkspaceRoot)) {
+        error("Path escapes workspace root: ${workspaceRelative(path, workspaceRoot)}")
     }
 }
 
