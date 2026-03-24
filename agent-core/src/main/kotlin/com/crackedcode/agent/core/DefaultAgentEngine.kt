@@ -1,6 +1,7 @@
 package com.crackedcode.agent.core
 
 import java.nio.file.Files
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -59,6 +60,9 @@ class DefaultAgentEngine(
     override fun reviewApproval(sessionId: String, approvalId: String, approved: Boolean): Flow<AgentEvent> = flow {
         val approval = sessionStore.getPendingApproval(sessionId, approvalId)
             ?: error("Unknown approval $approvalId for session $sessionId")
+        check(approval.status == PendingApprovalStatus.PENDING) {
+            "Approval $approvalId for session $sessionId is already ${approval.status} and cannot be reviewed again"
+        }
         val nextStatus = if (approved) PendingApprovalStatus.APPROVED else PendingApprovalStatus.DENIED
         sessionStore.updatePendingApproval(sessionId, approvalId, nextStatus)
         emit(AgentEvent.ApprovalResolved(sessionId, approvalId, approved))
@@ -126,21 +130,32 @@ class DefaultAgentEngine(
 
             val textBuffer = StringBuilder()
             val toolCalls = mutableListOf<ToolCallRequest>()
-            provider.streamTurn(context, freshSnapshot.items, toolRegistry.list()).collect { event ->
-                when (event) {
-                    is ProviderEvent.TextDelta -> {
-                        textBuffer.append(event.delta)
-                        emit(AgentEvent.AssistantTextDelta(sessionId, event.delta))
-                    }
+            try {
+                provider.streamTurn(context, freshSnapshot.items, toolRegistry.list()).collect { event ->
+                    when (event) {
+                        is ProviderEvent.TextDelta -> {
+                            textBuffer.append(event.delta)
+                            emit(AgentEvent.AssistantTextDelta(sessionId, event.delta))
+                        }
 
-                    is ProviderEvent.ToolCallsPrepared -> {
-                        toolCalls += event.toolCalls
-                    }
+                        is ProviderEvent.ToolCallsPrepared -> {
+                            toolCalls += event.toolCalls
+                        }
 
-                    is ProviderEvent.Completed -> {
-                        // The engine already knows whether work should continue based on tool calls.
+                        is ProviderEvent.Completed -> {
+                            // The engine already knows whether work should continue based on tool calls.
+                        }
                     }
                 }
+            } catch (error: Throwable) {
+                if (error is CancellationException) {
+                    throw error
+                }
+                sessionStore.updateSessionStatus(sessionId, SessionStatus.FAILED)
+                sessionStore.saveCheckpoint(sessionId, "provider turn failed")
+                emit(AgentEvent.StatusChanged(sessionId, SessionStatus.FAILED))
+                emit(AgentEvent.Error(sessionId, error.message ?: "Provider turn failed."))
+                break
             }
 
             if (textBuffer.isNotBlank() || toolCalls.isNotEmpty()) {
