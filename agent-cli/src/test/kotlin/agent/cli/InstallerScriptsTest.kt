@@ -73,6 +73,60 @@ class InstallerScriptsTest {
         assertFalse(Files.exists(installDir))
     }
 
+    @Test
+    fun `install and uninstall scripts default to local bin under home`() {
+        val repoRoot = findRepoRoot()
+        val tempRoot = Files.createTempDirectory("agent-install-defaults-test")
+        val fakeDist = tempRoot.resolve("dist")
+        val fakeLauncher = fakeDist.resolve("bin").resolve("agent")
+        Files.createDirectories(fakeLauncher.parent)
+        Files.writeString(
+            fakeLauncher,
+            "#!/usr/bin/env bash\necho agent-test\n",
+            StandardCharsets.UTF_8,
+        )
+        Files.setPosixFilePermissions(fakeLauncher, PosixFilePermissions.fromString("rwxr-xr-x"))
+
+        val homeDir = tempRoot.resolve("home")
+        Files.createDirectories(homeDir)
+        val expectedBinDir = homeDir.resolve(".local").resolve("bin")
+        val expectedInstallDir = homeDir.resolve(".local").resolve("share").resolve("agent")
+
+        val installResult = runScript(
+            repoRoot.resolve("scripts").resolve("install-cli.sh"),
+            emptyList(),
+            repoRoot,
+            mapOf(
+                "HOME" to homeDir.toString(),
+                "AGENT_SKIP_BUILD" to "1",
+                "AGENT_DIST_DIR" to fakeDist.toString(),
+                "AGENT_VERSION" to "test-version",
+                "PATH" to "/usr/bin:/bin",
+            ),
+        )
+
+        assertEquals(0, installResult.exitCode)
+        assertTrue(Files.isSymbolicLink(expectedBinDir.resolve("agent")))
+        assertTrue(Files.isSymbolicLink(expectedInstallDir.resolve("current")))
+        assertTrue(Files.exists(expectedInstallDir.resolve("test-version").resolve("bin").resolve("agent")))
+        assertContains(installResult.output, "launcher: ${expectedBinDir.resolve("agent")}")
+        assertContains(installResult.output, "export PATH=\"${expectedBinDir}:")
+
+        val uninstallResult = runScript(
+            repoRoot.resolve("scripts").resolve("uninstall-cli.sh"),
+            emptyList(),
+            repoRoot,
+            mapOf(
+                "HOME" to homeDir.toString(),
+                "PATH" to "/usr/bin:/bin",
+            ),
+        )
+
+        assertEquals(0, uninstallResult.exitCode)
+        assertFalse(Files.exists(expectedBinDir.resolve("agent")))
+        assertFalse(Files.exists(expectedInstallDir))
+    }
+
     private fun runScript(
         script: Path,
         args: List<String>,

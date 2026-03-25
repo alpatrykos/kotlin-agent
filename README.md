@@ -8,7 +8,7 @@ scripts/install-cli.sh
 agent
 ```
 
-Set `OPENAI_API_KEY` before launching `agent`, or provide `apiKey` in config. If `~/bin` is not on your `PATH`, add `export PATH="$HOME/bin:$PATH"`.
+Set `OPENAI_API_KEY` before launching `agent`, or provide `apiKey` in config. If `~/.local/bin` is not on your `PATH`, add `export PATH="$HOME/.local/bin:$PATH"`.
 
 ## What It Does
 
@@ -61,6 +61,6 @@ apiKey=your-api-key
 
 - Requires JDK 17+ to build locally.
 - Run `./gradlew test verifyAgentInstallDist` to execute the test suite and verify the generated launcher.
-- `scripts/install-cli.sh` installs the distribution under `~/.local/share/agent/<version>` and symlinks `~/bin/agent`.
+- `scripts/install-cli.sh` installs the distribution under `~/.local/share/agent/<version>` and symlinks `~/.local/bin/agent`.
 
 Licensed under the [MIT License](LICENSE).
