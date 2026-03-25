@@ -21,14 +21,14 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 data class OpenAiCompatibleConfig(
     val baseUrl: String,
@@ -46,15 +46,16 @@ class OpenAiCompatibleProvider(
         conversation: List<ConversationItem>,
         tools: List<ToolSpec>,
     ): Flow<ProviderEvent> = flow {
-        val requestBody = ChatCompletionsRequest(
+        val requestBody = ResponsesRequest(
             model = config.model,
-            messages = conversation.map(::toChatMessage),
-            tools = tools.takeIf { it.isNotEmpty() }?.map(::toChatTool),
+            input = conversation.flatMap(::toResponseInputItems),
+            tools = tools.takeIf { it.isNotEmpty() }?.map(::toResponseTool),
             stream = true,
+            store = false,
             temperature = config.temperature,
         )
         val requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create("${config.baseUrl.trimEnd('/')}/chat/completions"))
+            .uri(URI.create("${config.baseUrl.trimEnd('/')}/responses"))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(AgentJson.encodeToString(requestBody)))
         if (config.apiKey.isNotBlank()) {
@@ -65,39 +66,68 @@ class OpenAiCompatibleProvider(
             HttpResponse.BodyHandlers.ofInputStream(),
         )
         if (response.statusCode() !in 200..299) {
-            val body = response.body().readAllBytes().toString(StandardCharsets.UTF_8)
+            val body = response.body().use { input ->
+                input.readAllBytes().toString(StandardCharsets.UTF_8)
+            }
             error("Provider request failed with ${response.statusCode()}: $body")
         }
 
         BufferedReader(InputStreamReader(response.body(), StandardCharsets.UTF_8)).use { reader ->
             val toolCallAccumulators = linkedMapOf<Int, ToolCallAccumulator>()
-            var finishReason: String? = null
-            while (true) {
-                val rawLine = reader.readLine() ?: break
-                if (rawLine.isBlank() || !rawLine.startsWith("data:")) {
-                    continue
-                }
-                val payload = rawLine.removePrefix("data:").trim()
+            var completionStatus: String? = null
+
+            parseSseStream(reader) { payload ->
                 if (payload == "[DONE]") {
-                    break
+                    return@parseSseStream
                 }
-                val chunk = AgentJson.decodeFromString(ChatCompletionsChunk.serializer(), payload)
-                val choice = chunk.choices.firstOrNull() ?: continue
-                choice.delta.content?.let { emit(ProviderEvent.TextDelta(it)) }
-                choice.delta.toolCalls.orEmpty().forEach { delta ->
-                    val accumulator = toolCallAccumulators.getOrPut(delta.index) { ToolCallAccumulator() }
-                    if (delta.id != null) {
-                        accumulator.id = delta.id
+                val event = AgentJson.parseToJsonElement(payload).jsonObject
+                when (event.string("type")) {
+                    "response.output_text.delta" -> {
+                        event.string("delta")?.let { emit(ProviderEvent.TextDelta(it)) }
                     }
-                    if (delta.function?.name != null) {
-                        accumulator.name = delta.function.name
+
+                    "response.output_item.added" -> {
+                        val outputIndex = event.int("output_index") ?: return@parseSseStream
+                        val item = event.objectValue("item") ?: return@parseSseStream
+                        if (item.string("type") == "function_call") {
+                            val accumulator = toolCallAccumulators.getOrPut(outputIndex) { ToolCallAccumulator() }
+                            accumulator.callId = item.string("call_id") ?: accumulator.callId
+                            accumulator.name = item.string("name") ?: accumulator.name
+                            item.string("arguments")?.let(accumulator::setArgumentsIfEmpty)
+                        }
                     }
-                    if (delta.function?.arguments != null) {
-                        accumulator.arguments.append(delta.function.arguments)
+
+                    "response.function_call_arguments.delta" -> {
+                        val outputIndex = event.int("output_index") ?: return@parseSseStream
+                        val delta = event.string("delta") ?: return@parseSseStream
+                        val accumulator = toolCallAccumulators.getOrPut(outputIndex) { ToolCallAccumulator() }
+                        accumulator.arguments.append(delta)
                     }
-                }
-                if (choice.finishReason != null) {
-                    finishReason = choice.finishReason
+
+                    "response.function_call_arguments.done" -> {
+                        val outputIndex = event.int("output_index") ?: return@parseSseStream
+                        val accumulator = toolCallAccumulators.getOrPut(outputIndex) { ToolCallAccumulator() }
+                        val item = event.objectValue("item")
+                        accumulator.callId = item?.string("call_id") ?: event.string("call_id") ?: accumulator.callId
+                        accumulator.name = item?.string("name") ?: event.string("name") ?: accumulator.name
+                        item?.string("arguments")?.let(accumulator::setArguments)
+                            ?: event.string("arguments")?.let(accumulator::setArguments)
+                    }
+
+                    "response.output_item.done" -> {
+                        val outputIndex = event.int("output_index") ?: return@parseSseStream
+                        val item = event.objectValue("item") ?: return@parseSseStream
+                        if (item.string("type") == "function_call") {
+                            val accumulator = toolCallAccumulators.getOrPut(outputIndex) { ToolCallAccumulator() }
+                            accumulator.callId = item.string("call_id") ?: accumulator.callId
+                            accumulator.name = item.string("name") ?: accumulator.name
+                            item.string("arguments")?.let(accumulator::setArguments)
+                        }
+                    }
+
+                    "response.completed" -> {
+                        completionStatus = event.objectValue("response")?.string("status") ?: "completed"
+                    }
                 }
             }
 
@@ -106,7 +136,7 @@ class OpenAiCompatibleProvider(
                     ProviderEvent.ToolCallsPrepared(
                         toolCallAccumulators.entries.sortedBy { it.key }.map { (_, accumulator) ->
                             ToolCallRequest(
-                                id = accumulator.id ?: "call_${UUID.randomUUID()}",
+                                id = accumulator.callId ?: "call_${UUID.randomUUID()}",
                                 name = accumulator.name ?: error("Missing function name in streamed tool call."),
                                 arguments = parseArguments(accumulator.arguments.toString()),
                             )
@@ -114,7 +144,32 @@ class OpenAiCompatibleProvider(
                     ),
                 )
             }
-            emit(ProviderEvent.Completed(finishReason))
+            emit(ProviderEvent.Completed(completionStatus))
+        }
+    }
+
+    private suspend fun parseSseStream(reader: BufferedReader, onData: suspend (String) -> Unit) {
+        val dataLines = mutableListOf<String>()
+        while (true) {
+            val rawLine = reader.readLine()
+            if (rawLine == null) {
+                flushSseData(dataLines, onData)
+                break
+            }
+            if (rawLine.isBlank()) {
+                flushSseData(dataLines, onData)
+                dataLines.clear()
+                continue
+            }
+            if (rawLine.startsWith("data:")) {
+                dataLines += rawLine.removePrefix("data:").trimStart()
+            }
+        }
+    }
+
+    private suspend fun flushSseData(dataLines: List<String>, onData: suspend (String) -> Unit) {
+        if (dataLines.isNotEmpty()) {
+            onData(dataLines.joinToString("\n"))
         }
     }
 
@@ -125,126 +180,91 @@ class OpenAiCompatibleProvider(
         return AgentJson.parseToJsonElement(arguments).jsonObject
     }
 
-    private fun toChatTool(spec: ToolSpec): ChatTool {
-        return ChatTool(
-            function = ChatToolFunction(
-                name = spec.name,
-                description = spec.description,
-                parameters = spec.parameters,
-                strict = true,
-            ),
+    private fun toResponseTool(spec: ToolSpec): ResponseTool {
+        return ResponseTool(
+            name = spec.name,
+            description = spec.description,
+            parameters = spec.parameters,
+            strict = true,
         )
     }
 
-    private fun toChatMessage(item: ConversationItem): ChatMessage {
+    private fun toResponseInputItems(item: ConversationItem): List<JsonObject> {
         return when (item) {
-            is SystemMessage -> ChatMessage(role = "system", content = item.content)
-            is UserMessage -> ChatMessage(role = "user", content = item.content)
-            is AssistantMessage -> ChatMessage(
-                role = "assistant",
-                content = item.content.takeIf { it.isNotBlank() },
-                toolCalls = item.toolCalls.takeIf { it.isNotEmpty() }?.map { toolCall ->
-                    ChatToolCall(
-                        id = toolCall.id,
-                        function = ChatToolCallFunction(
-                            name = toolCall.name,
-                            arguments = AgentJson.encodeToString(JsonObject.serializer(), toolCall.arguments),
-                        ),
+            is SystemMessage -> listOf(messageInput(role = "system", content = item.content))
+            is UserMessage -> listOf(messageInput(role = "user", content = item.content))
+            is AssistantMessage -> buildList {
+                if (item.content.isNotBlank()) {
+                    add(messageInput(role = "assistant", content = item.content))
+                }
+                item.toolCalls.forEach { toolCall ->
+                    add(
+                        buildJsonObject {
+                            put("type", "function_call")
+                            put("call_id", toolCall.id)
+                            put("name", toolCall.name)
+                            put("arguments", AgentJson.encodeToString(JsonObject.serializer(), toolCall.arguments))
+                        },
                     )
+                }
+            }
+
+            is ToolResultMessage -> listOf(
+                buildJsonObject {
+                    put("type", "function_call_output")
+                    put("call_id", item.toolCallId)
+                    put("output", item.content)
                 },
             )
+        }
+    }
 
-            is ToolResultMessage -> ChatMessage(
-                role = "tool",
-                content = item.content,
-                toolCallId = item.toolCallId,
-                name = item.toolName,
-            )
+    private fun messageInput(role: String, content: String): JsonObject {
+        return buildJsonObject {
+            put("role", role)
+            put("content", content)
         }
     }
 }
 
 private data class ToolCallAccumulator(
-    var id: String? = null,
+    var callId: String? = null,
     var name: String? = null,
     val arguments: StringBuilder = StringBuilder(),
-)
+) {
+    fun setArguments(value: String) {
+        arguments.setLength(0)
+        arguments.append(value)
+    }
+
+    fun setArgumentsIfEmpty(value: String) {
+        if (arguments.isEmpty()) {
+            arguments.append(value)
+        }
+    }
+}
 
 @Serializable
-private data class ChatCompletionsRequest(
+private data class ResponsesRequest(
     val model: String,
-    val messages: List<ChatMessage>,
-    val tools: List<ChatTool>? = null,
+    val input: List<JsonObject>,
+    val tools: List<ResponseTool>? = null,
     val stream: Boolean = true,
+    val store: Boolean = false,
     val temperature: Double? = null,
 )
 
 @Serializable
-private data class ChatMessage(
-    val role: String,
-    val content: String? = null,
-    @SerialName("tool_calls")
-    val toolCalls: List<ChatToolCall>? = null,
-    @SerialName("tool_call_id")
-    val toolCallId: String? = null,
-    val name: String? = null,
-)
-
-@Serializable
-private data class ChatTool(
+private data class ResponseTool(
     val type: String = "function",
-    val function: ChatToolFunction,
-)
-
-@Serializable
-private data class ChatToolFunction(
     val name: String,
     val description: String,
     val parameters: JsonObject,
     val strict: Boolean = true,
 )
 
-@Serializable
-private data class ChatToolCall(
-    val id: String,
-    val type: String = "function",
-    val function: ChatToolCallFunction,
-)
+private fun JsonObject.string(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull
 
-@Serializable
-private data class ChatToolCallFunction(
-    val name: String,
-    val arguments: String,
-)
+private fun JsonObject.int(name: String): Int? = this[name]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
 
-@Serializable
-private data class ChatCompletionsChunk(
-    val choices: List<ChatChoice>,
-)
-
-@Serializable
-private data class ChatChoice(
-    val delta: ChatDelta = ChatDelta(),
-    @SerialName("finish_reason")
-    val finishReason: String? = null,
-)
-
-@Serializable
-private data class ChatDelta(
-    val content: String? = null,
-    @SerialName("tool_calls")
-    val toolCalls: List<ChatToolCallDelta>? = null,
-)
-
-@Serializable
-private data class ChatToolCallDelta(
-    val index: Int,
-    val id: String? = null,
-    val function: ChatToolCallDeltaFunction? = null,
-)
-
-@Serializable
-private data class ChatToolCallDeltaFunction(
-    val name: String? = null,
-    val arguments: String? = null,
-)
+private fun JsonObject.objectValue(name: String): JsonObject? = this[name]?.jsonObject

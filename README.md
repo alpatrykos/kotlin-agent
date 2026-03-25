@@ -1,6 +1,6 @@
 # kotlin-agent
 
-`kotlin-agent` is a Kotlin/JVM coding agent CLI that runs locally in your workspace, uses an OpenAI-compatible `/chat/completions` backend, and requires approval before mutating actions.
+`kotlin-agent` is a Kotlin/JVM coding agent CLI that runs locally in your workspace, uses the OpenAI `/responses` API, and requires approval before mutating actions.
 
 ```shell
 ./gradlew installAgent
@@ -15,7 +15,7 @@ Set `OPENAI_API_KEY` before launching `agent`, or provide `apiKey` in config. If
 - Runs in the current directory by default, or against an explicit workspace with `--workspace`.
 - Auto-approves read-only tools and requires approval for mutating tools.
 - Persists sessions, approvals, and artifacts in `.agent/`.
-- Streams model responses through an OpenAI-compatible `/chat/completions` provider.
+- Streams model responses through the OpenAI `/responses` API.
 - Ships with `list_files`, `read_file`, `search_files`, `run_shell`, and `apply_patch`.
 
 ## Quickstart
